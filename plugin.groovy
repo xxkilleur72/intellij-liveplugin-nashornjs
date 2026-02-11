@@ -1,113 +1,168 @@
 import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.vfs.*
+import java.io.File
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import static liveplugin.PluginUtil.*
 
-def nashornToGroovyAction = new AnAction("Convert Nashorn to Groovy") {
-    @Override
-    void actionPerformed(AnActionEvent event) {
-        def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
-        if (file == null) return
+// --- Configuration ---
+class Config {
+    static final String NASHORN_JS_EXT = ".nashorn.js"
+    static final String GROOVY_EXT = ".groovy"
 
-        ApplicationManager.application.runWriteAction {
-            if (file.isDirectory()) {
-                // If it's a folder, walk through it
-                VfsUtilCore.visitChildrenRecursively(file, new VirtualFileVisitor() {
-                    @Override
-                    boolean visitFile(VirtualFile child) {
-                        if (child.name.endsWith(".nashorn.js")) processFile(child)
-                        return true
-                    }
-                })
-            } else if (file.name.endsWith(".nashorn.js")) {
-                // If it's just one file, process only that one
-                processFile(file)
-            }
-        }
-    }
+    static final String SOURCE_EXT = NASHORN_JS_EXT
+    static final String TARGET_EXT = GROOVY_EXT
+    static final String BACKUP_PATH = "C:/Absolute/Path/To/Your/Backup/Folder"
 
-    @Override
-    void update(AnActionEvent event) {
-        def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
-        // Show if it's a directory OR if it's a Nashorn file
-        boolean isNashorn = file != null && (file.isDirectory() || file.name.endsWith(".nashorn.js"))
-        event.presentation.enabledAndVisible = isNashorn
-    }
-
-    @Override
-    ActionUpdateThread getActionUpdateThread() { return ActionUpdateThread.BGT }
-}
-
-def addMethodsToGroovyScript = new AnAction("Add Methods to Groovy Scripts") {
-    @Override
-    void actionPerformed(AnActionEvent event) {
-        def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
-        if (file == null) return
-
-        // Your multiline string
-        String methods = """//-------------------METHODS------------------
-def method1() { return method2() }
-def method2() { return x }
-def method3() { return [] }
+    static final String[] METHODS_POSSIBLE_SIGNATURES = ["def getV", "def getVD", "def makeC"]
+    static final String METHODS_TO_ADD = """//-------------------METHODS------------------
+def getV() { return getVD() }
+def getVD() { return x }
+def makeC() { return [] }
 //-------------------END/METHODS---------------"""
 
-        ApplicationManager.application.runWriteAction {
-            if (file.isDirectory()) {
-                VfsUtilCore.visitChildrenRecursively(file, new VirtualFileVisitor() {
-                    @Override
-                    boolean visitFile(VirtualFile child) {
-                        // Targeted all .groovy files
-                        if (child.name.endsWith(".groovy")) {
-                            appendMethodsToFile(child, methods)
-                        }
-                        return true
+    static final Map<String, String> SCRIPT_LANGUAGE_MAP = [
+            (NASHORN_JS_EXT) : "Nashorn JavaScript",
+            (GROOVY_EXT) : "Groovy"
+    ].withDefault { "Unknown" }
+}
+
+// --- Action Definitions ---
+class ConverterActions {
+
+    static AnAction createGoogleSheetObProgressSheetData() {
+        return new AnAction("Export Scripts Data to Clipboard for Google Sheet") {
+            @Override
+            void actionPerformed(AnActionEvent event) {
+                def rootFile = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                if (rootFile == null) return
+
+                StringBuilder sb = new StringBuilder()
+
+                iterateFiles(rootFile, "") { child ->
+                    String rawName = child.name
+                    String matchedExt = null
+
+                    if (rawName.endsWith(Config.NASHORN_JS_EXT)) matchedExt = Config.NASHORN_JS_EXT
+                    else if (rawName.endsWith(Config.GROOVY_EXT)) matchedExt = Config.GROOVY_EXT
+
+                    if (matchedExt) {
+                        String folderPath = child.parent != null ? child.parent.path : ""
+                        String cleanName = rawName.replace(matchedExt, "")
+                        String language = Config.SCRIPT_LANGUAGE_MAP[matchedExt]
+                        sb.append("${folderPath}\t${language}\t${cleanName}\n")
                     }
-                })
-            } else if (file.name.endsWith(".groovy")) {
-                appendMethodsToFile(file, methods)
+                }
+
+                copyToClipboard(sb.toString())
+                show "Cleaned data copied to clipboard!"
             }
+
+            @Override
+            void update(AnActionEvent event) {
+                def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                event.presentation.enabledAndVisible = file != null && file.isDirectory()
+            }
+
+            @Override
+            ActionUpdateThread getActionUpdateThread() { return ActionUpdateThread.BGT }
         }
     }
 
-    @Override
-    void update(AnActionEvent event) {
-        def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
-        // Show if folder or any .groovy file
-        boolean isGroovy = file != null && (file.isDirectory() || file.name.endsWith(".groovy"))
-        event.presentation.enabledAndVisible = isGroovy
-    }
-
-    @Override
-    ActionUpdateThread getActionUpdateThread() { return ActionUpdateThread.BGT }
-}
-
-// Add to the right-click menu
-ActionManager.instance.getAction("ProjectViewPopupMenu").add(nashornToGroovyAction, Constraints.FIRST)
-ActionManager.instance.getAction("ProjectViewPopupMenu").add(addMethodsToGroovyScript, Constraints.FIRST)
-
-void processFile(VirtualFile file) {
-    file.copy(this, file.parent, file.name + ".old")
-    file.rename(this, file.name.replace(".nashorn.js", ".groovy"))
-}
-
-// Helper to handle the reading and writing
-void appendMethodsToFile(VirtualFile file, String methodsToAdd) {
-    try {
-        String currentContent = VfsUtilCore.loadText(file)
-
-        def signatures = ["def getV", "def getVD", "def makeC"]
-
-        boolean alreadyExists = signatures.any { currentContent.contains(it) }
-
-        // Check if methods already exist to avoid double-appending
-        if (!alreadyExists) {
-            String newContent = currentContent + "\n" + methodsToAdd
-            VfsUtil.saveText(file, newContent)
-            println "Updated: ${file.name}"
-        } else {
-            println "Skipped: ${file.name} (Methods already present)"
+    static AnAction convertExtensionFromSourceToTarget() {
+        return new AnAction("Convert Nashorn to Groovy") {
+            @Override
+            void actionPerformed(AnActionEvent event) {
+                def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                if (file == null) return
+                ApplicationManager.application.runWriteAction {
+                    iterateFiles(file, Config.SOURCE_EXT) { child -> processFile(child) }
+                }
+            }
+            @Override
+            void update(AnActionEvent event) {
+                def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                event.presentation.enabledAndVisible = file != null && (file.isDirectory() || file.name.endsWith(Config.SOURCE_EXT))
+            }
+            @Override
+            ActionUpdateThread getActionUpdateThread() { return ActionUpdateThread.BGT }
         }
-    } catch (Exception e) {
-        println "Error processing ${file.name}: ${e.message}"
+    }
+
+    static AnAction createAddMethodsAction() {
+        return new AnAction("Add Methods to Groovy Scripts") {
+            @Override
+            void actionPerformed(AnActionEvent event) {
+                def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                if (file == null) return
+                ApplicationManager.application.runWriteAction {
+                    iterateFiles(file, Config.TARGET_EXT) { child -> appendMethodsToFile(child) }
+                }
+            }
+            @Override
+            void update(AnActionEvent event) {
+                def file = event.getData(CommonDataKeys.VIRTUAL_FILE)
+                event.presentation.enabledAndVisible = file != null && (file.isDirectory() || file.name.endsWith(Config.TARGET_EXT))
+            }
+            @Override
+            ActionUpdateThread getActionUpdateThread() { return ActionUpdateThread.BGT }
+        }
+    }
+
+    // --- Internal Logic Helpers ---
+    private static void copyToClipboard(String text) {
+        def selection = new StringSelection(text)
+        Toolkit.defaultToolkit.systemClipboard.setContents(selection, selection)
+    }
+
+    private static void iterateFiles(VirtualFile root, String extension, Closure logic) {
+        if (root.isDirectory()) {
+            VfsUtilCore.visitChildrenRecursively(root, new VirtualFileVisitor() {
+                @Override
+                boolean visitFile(VirtualFile child) {
+                    if (extension == "" || child.name.endsWith(extension)) logic(child)
+                    return true
+                }
+            })
+        } else if (extension == "" || root.name.endsWith(extension)) {
+            logic(root)
+        }
+    }
+
+    private static void processFile(VirtualFile file) {
+        try {
+            File backupIoFile = new File(Config.BACKUP_PATH)
+            if (!backupIoFile.exists()) backupIoFile.mkdirs()
+
+            VirtualFile backupDir = LocalFileSystem.instance.refreshAndFindFileByIoFile(backupIoFile)
+            if (backupDir != null) {
+                if (backupDir.findChild(file.name) == null) {
+                    file.copy(null, backupDir, file.name)
+                }
+                file.rename(null, file.name.replace(Config.SOURCE_EXT, Config.TARGET_EXT))
+            }
+        } catch (Exception e) {
+            show "Error processing ${file.name}: ${e.message}"
+        }
+    }
+
+    private static void appendMethodsToFile(VirtualFile file) {
+        try {
+            String content = VfsUtilCore.loadText(file)
+            boolean alreadyHasMethods = Config.METHODS_POSSIBLE_SIGNATURES.any { content.contains(it) }
+            if (!alreadyHasMethods) {
+                VfsUtil.saveText(file, content + "\n" + Config.METHODS_TO_ADD)
+                show "Updated: ${file.name}"
+            }
+        } catch (Exception e) {
+            show "Error updating ${file.name}: ${e.message}"
+        }
     }
 }
+
+// --- Main Execution (Registration) ---
+def popupMenu = ActionManager.instance.getAction("ProjectViewPopupMenu")
+popupMenu.add(ConverterActions.convertExtensionFromSourceToTarget(), Constraints.FIRST)
+popupMenu.add(ConverterActions.createAddMethodsAction(), Constraints.FIRST)
+popupMenu.add(ConverterActions.createGoogleSheetObProgressSheetData(), Constraints.FIRST)
